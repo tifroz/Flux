@@ -16,11 +16,11 @@ enum FASFluxCallbackType {
 }
 
 // CHANGED: new log delegate
-enum FASLogLevel {
+public enum FASLogLevel {
   case debug, warn, error
 }
 
-protocol FASFluxDispatcherLogDelegate: class {
+public protocol FASFluxDispatcherLogDelegate: class {
   func dispatcherLog(_ sender: Any, level: FASLogLevel, message: String, error: Error?)
 }
 
@@ -35,13 +35,13 @@ public class FASFluxDispatcher {
   var pendingAction : Any?
   var isDispatching : Bool = false
   
-  weak var logDelegate: FASFluxDispatcherLogDelegate?
+  public weak var logDelegate: FASFluxDispatcherLogDelegate?
   
   init() {
     dispatchQueue = DispatchQueue.main
   }
   
-  func nextRegistrationToken() -> String {
+  private func nextRegistrationToken() -> String {
     lastID = lastID + 1
     let token = "token_\(lastID)"
     return token
@@ -53,9 +53,9 @@ public class FASFluxDispatcher {
     return token
   }
   
-  fileprivate func register(fn : @escaping FASFluxCallback, storeName: String?) -> String {
+  fileprivate func register(fn : @escaping FASFluxCallback, storeType: FASFluxStore.Type) -> String {
     let token = register(callback: .Func(fn))
-    log(level: .debug, message: "registration token '\(token)' assigned to store '\(storeName ?? "unnamed store")' (see store.name property)")
+    log(level: .debug, message: "registration token '\(token)' assigned to store '\(storeType)'")
     return token
   }
   
@@ -67,21 +67,22 @@ public class FASFluxDispatcher {
     }
   }
   
-  func waitFor(stores:[FASFluxStore]) {
+  public func waitFor(stores:[FASFluxStore]) {
     guard isDispatching else { return }
     
     for store in stores {
-      var storeIdentifier = store.name ?? "unnamed store"
       if let token = store.dispatchToken {
-        storeIdentifier = store.name ?? "unnamed store (\(token))"
         let pending = isPending[token] ?? false
         let handled = isHandled[token] ?? false
         if pending {
           if handled {
-            log(level: .debug, message: "Dispatcher waitFor : the callback for '\(storeIdentifier)' has handled the action already")
+            //            var stack = ""
+            //            Thread.callStackSymbols.forEach{stack += "\($0)\n"}
+            //            log(level: .debug, message: "Dispatcher waitFor : the callback for '\(type(of: store))' has handled the action already\n\(stack)")
+            log(level: .debug, message: "Dispatcher waitFor : the callback for '\(type(of: store))' has handled the action already")
             continue
           } else {
-            log(level: .warn, message: "⚠️ Dispatcher waitFor : circular dependency detected while waiting for  '\(storeIdentifier)'")
+            log(level: .warn, message: "⚠️ Dispatcher waitFor : circular dependency detected while waiting for '\(type(of: store))'")
             continue
           }
         }
@@ -89,15 +90,15 @@ public class FASFluxDispatcher {
         if let _ = callbacks[token] {
           invokeCallback(token: token)
         } else {
-          log(level: .warn, message: "⚠️ Dispatcher waitFor '\(storeIdentifier)' does not map to a registered Callback")
+          log(level: .warn, message: "⚠️ Dispatcher waitFor '\(type(of: store))' does not map to a registered Callback")
         }
       } else {
-        log(level: .warn, message: "⚠️ Can't wait for store '\(storeIdentifier)' because it's not registered")
+        log(level: .warn, message: "⚠️ Can't wait for store '\(type(of: store))' because it's not registered")
       }
     }
   }
   
-  func invokeCallback(token : String) {
+  private func invokeCallback(token : String) {
     if let callback = callbacks[token] {
       isPending[token] = true
       switch callback {
@@ -112,19 +113,19 @@ public class FASFluxDispatcher {
     }
   }
   
-  func startDispatching(action : Any) {
+  private func startDispatching(action : Any) {
     isPending.removeAll()
     isHandled.removeAll()
     pendingAction = action
     isDispatching = true
   }
   
-  func stopDispatching() {
+  private func stopDispatching() {
     pendingAction = nil
     isDispatching = false
   }
   
-  func doDispatch(action:Any) {
+  private func doDispatch(action:Any) {
     guard !isDispatching else {
       log(level: .error, message: "🛑 Dispatch.dispatchAction cannot dispatch in the middle of a dispatch!")
       return
@@ -140,7 +141,7 @@ public class FASFluxDispatcher {
     }
   }
   
-  func dispatchAction(action : Any) {
+  public func dispatchAction(action : Any) {
     if Thread.isMainThread {
       doDispatch(action: action)
     } else {
@@ -169,7 +170,7 @@ extension FASFluxDispatcher {
 }
 
 public protocol FASStoreObserving: class {
-  func observeChange(store:FASFluxStore,userInfo:[AnyHashable:Any]?)
+  func observeChange(store:FASFluxStore, action: Any?, userInfo: Any?)
 }
 
 fileprivate class FASObserverProxy {
@@ -178,9 +179,9 @@ fileprivate class FASObserverProxy {
     self.observer = observer
   }
   
-  func forwardChange(store: FASFluxStore, userInfo: [AnyHashable : Any]?) -> Bool {
+  func forwardChange(store: FASFluxStore, action: Any?, userInfo: Any?) -> Bool {
     if let o = observer {
-      o.observeChange(store: store, userInfo: userInfo)
+      o.observeChange(store: store, action: action, userInfo: userInfo)
       return true
     }
     return false
@@ -191,12 +192,11 @@ open class FASFluxStore {
   fileprivate var dispatchToken : String?
   private var observerProxies : [FASObserverProxy] = []
   weak var logDelegate: FASFluxDispatcherLogDelegate?
-  
-  var name: String?
+  private var isEmitting = false
   
   public func registerWithDispatcher(_ dispatcher: FASFluxDispatcher, callback: @escaping FASFluxCallback) {
     self.logDelegate = dispatcher.logDelegate
-    dispatchToken = dispatcher.register(fn: callback, storeName: name)
+    dispatchToken = dispatcher.register(fn: callback, storeType: type(of: self))
   }
   
   func unregisterFromDispatcher(_ dispatcher: FASFluxDispatcher, callback: @escaping FASFluxCallback) {
@@ -211,30 +211,49 @@ open class FASFluxStore {
   }
   
   public func add(observer:FASStoreObserving) {
-    let existing = observerProxies.first { (proxy: FASObserverProxy) -> Bool in
+    checkMainThread(contextString: "add(observer:)")
+    let existing = self.observerProxies.first { (proxy: FASObserverProxy) -> Bool in
       proxy.observer === observer
     }
     if existing == nil {
       let weakObserver = FASObserverProxy(observer: observer)
-      observerProxies.append(weakObserver)
+      if isEmitting {
+        log(level: .warn, message: "WARN Will add(observer:FASStoreObserving) asynchronously because the store \(type(of: self)) is currently emitting")
+        DispatchQueue.main.async {
+          self.observerProxies.append(weakObserver)
+        }
+      } else {
+        self.observerProxies.append(weakObserver)
+      }
     } else {
-      log(level: .warn, message: "⚠️ '\(String(describing: observer))' is already observing '\(String(describing: self))'.")
-    }
-  }
-  public func remove(observer:FASStoreObserving) {
-    if let index = observerProxies.index(where: { po in return po.observer === observer }) {
-      observerProxies.remove(at: index)
+      self.log(level: .warn, message: "⚠️ '\(String(describing: observer))' is already observing '\(String(describing: self))'.")
     }
   }
   
-  public func emitChange(userInfo: [AnyHashable:Any]?) {
-    guard Thread.isMainThread else {
-      NSLog("%@", "FATAL : Emit Change on \(self) has to be done from main Thread!!!!!")
-      abort()
+  public func remove(observer:FASStoreObserving) {
+    checkMainThread(contextString: "remove(observer:)")
+    func scanAndRemove() {
+      if let index = self.observerProxies.firstIndex(where: { po in return po.observer === observer }) {
+        self.observerProxies.remove(at: index)
+      }
     }
-    
-    observerProxies = observerProxies.filter { $0.forwardChange(store: self, userInfo: userInfo) }
+    if isEmitting {
+      log(level: .warn, message: "WARN Will remove(observer:FASStoreObserving) asynchronously because the store \(type(of: self)) is currently emitting")
+      DispatchQueue.main.async {
+        scanAndRemove()
+      }
+    } else {
+      scanAndRemove()
+    }
   }
+  
+  public func emitChange(_ action: Any? = nil, userInfo: Any? = nil) {
+    checkMainThread(contextString: "emitChange()")
+    isEmitting = true
+    self.observerProxies = observerProxies.filter { $0.forwardChange(store: self, action: action, userInfo: userInfo) }
+    isEmitting = false
+  }
+  
   
   public func emitChange() {
     emitChange(userInfo: nil)
@@ -243,14 +262,38 @@ open class FASFluxStore {
     emitChange(userInfo: ["afterAction":actionType])
   }
   
-  private func log(level: FASLogLevel, message: String, error: Error? = nil) {
+  public func printObservers() -> String {
+    let list = observerProxies.reduce("") { (result: String, observerProxy: FASObserverProxy) -> String in
+      var observerString = "nil"
+      if observerProxy.observer != nil {
+        observerString = "\(type(of: observerProxy.observer!))"
+      }
+      if result.count > 0 {
+        return result + ", \(observerString)"
+      } else {
+        return result + "\(observerString)"
+      }
+    }
+    return "(\(observerProxies.count) observers) \(list)"
+  }
+  
+  private func checkMainThread(contextString: String) {
+    if !Thread.isMainThread {
+      log(level: .warn, message: "WARN must be called from the main thread!! (contex=\(contextString)) ")
+      #if DEBUG
+      abort()
+      #endif
+    }
+  }
+  
+  
+  fileprivate func log(level: FASLogLevel, message: String, error: Error? = nil) {
     if logDelegate != nil {
       logDelegate!.dispatcherLog(self, level: level, message: message, error: error)
     } else {
       NSLog("%@", message)
     }
   }
-  
 }
 
 public protocol FASActionCreator {
