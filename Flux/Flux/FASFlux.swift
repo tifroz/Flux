@@ -208,7 +208,7 @@ open class FASFluxStore {
       self.logDelegate = dispatcher.logDelegate
       dispatchToken = dispatcher.register(fn: callback, storeType: type(of: self))
     } else {
-      log(level: .warn, message: "store '\(type(of: self))' registered with dispatcher on a secondary thread")
+      log(level: .warn, message: "store '\(type(of: self))' tried to register with dispatcher from a secondary thread")
       dispatcher.dispatchQueue.sync() { [weak self] in
         if let this = self {
           this.logDelegate = dispatcher.logDelegate
