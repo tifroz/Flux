@@ -48,6 +48,9 @@ public class FASFluxDispatcher {
   }
   
   private func register(callback : FASFluxCallbackType) -> String {
+    if !Thread.isMainThread {
+      fatalError("Detected unsafe register() call on secondary thread")
+    }
     let token = nextRegistrationToken()
     callbacks[token] = callback
     return token
@@ -60,6 +63,9 @@ public class FASFluxDispatcher {
   }
   
   fileprivate func unregister(token : String) {
+    if !Thread.isMainThread {
+      fatalError("Detected unsafe unregister() call on secondary thread")
+    }
     if let _ = callbacks[token] {
       callbacks.removeValue(forKey: token)
       isPending.removeValue(forKey: token)
@@ -68,8 +74,10 @@ public class FASFluxDispatcher {
   }
   
   public func waitFor(stores:[FASFluxStore]) {
+    if !Thread.isMainThread {
+      fatalError("Detected unsafe waitFor() call on secondary thread")
+    }
     guard isDispatching else { return }
-    
     for store in stores {
       if let token = store.dispatchToken {
         let pending = isPending[token] ?? false
@@ -114,6 +122,7 @@ public class FASFluxDispatcher {
   }
   
   private func startDispatching(action : Any) {
+    log(level: .debug, message: "startDispatching(action: '\(action))'")
     isPending.removeAll()
     isHandled.removeAll()
     pendingAction = action
@@ -195,15 +204,37 @@ open class FASFluxStore {
   private var isEmitting = false
   
   public func registerWithDispatcher(_ dispatcher: FASFluxDispatcher, callback: @escaping FASFluxCallback) {
-    self.logDelegate = dispatcher.logDelegate
-    dispatchToken = dispatcher.register(fn: callback, storeType: type(of: self))
+    if Thread.isMainThread {
+      self.logDelegate = dispatcher.logDelegate
+      dispatchToken = dispatcher.register(fn: callback, storeType: type(of: self))
+    } else {
+      log(level: .warn, message: "store '\(type(of: self))' registered with dispatcher on a secondary thread")
+      dispatcher.dispatchQueue.sync() { [weak self] in
+        if let this = self {
+          this.logDelegate = dispatcher.logDelegate
+          this.dispatchToken = dispatcher.register(fn: callback, storeType: type(of: this))
+        }
+      }
+    }
   }
   
   func unregisterFromDispatcher(_ dispatcher: FASFluxDispatcher, callback: @escaping FASFluxCallback) {
-    if let dt = dispatchToken {
-      dispatcher.unregister(token: dt)
+    if Thread.isMainThread {
+      if let dt = dispatchToken {
+        dispatcher.unregister(token: dt)
+      }
+      dispatchToken = nil
+    } else {
+      log(level: .warn, message: "store '\(type(of: self))' unregistered from dispatcher on a secondary thread")
+      dispatcher.dispatchQueue.sync() { [weak self] in
+        if let this = self {
+          if let dt = this.dispatchToken {
+            dispatcher.unregister(token: dt)
+          }
+          this.dispatchToken = nil
+        }
+      }
     }
-    dispatchToken = nil
   }
   
   public init() {
